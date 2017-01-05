@@ -1,0 +1,108 @@
+---
+- hosts: all
+  become: true
+
+  vars:
+    db_user: dspace
+    db_name: dspace
+    db_password: dspace
+    dspace_dir: /data/dspace
+    
+  tasks:
+    # PostgreSQL
+    - name: ensure postgres and related packages are installed
+      yum: name={{ item }} state=present
+      with_items:
+        - postgresql-server
+        - postgresql-contrib
+        - python-psycopg2
+
+    - name: init database
+      command: /usr/bin/postgresql-setup initdb
+      args:
+        creates: /var/lib/pgsql/data/pg_hba.conf
+    
+    - name: ensure postgres is running
+      service: name=postgresql state=started enabled=yes
+      
+    - name: ensure database user is present
+      become_user: postgres
+      postgresql_user: name={{db_user}} password={{db_password}} state=present
+  
+    - name: ensure database is created
+      become_user: postgres
+      postgresql_db: name={{db_name}} owner={{db_user}} encoding='UTF-8' state=present
+
+    - name: ensure database can be accessed with jdbc
+      lineinfile: dest=/var/lib/pgsql/data/pg_hba.conf
+                  state=present
+                  line='host\tdspace\t\tdspace\t\t127.0.0.1/32\t\tmd5'
+                  insertafter='# TYPE  DATABASE        USER            ADDRESS                 METHOD' 
+      notify: restart postgresql
+
+    - meta: flush_handlers # TODO maybe there is more elegant way to ensure postgres is restarted before installation
+      
+    # Tomcat
+    - name: ensure tomcat is installed
+      yum: name=tomcat
+
+    - name: configure tomcat server
+      template: src=server.xml dest=/etc/tomcat/
+      notify: restart tomcat # TODO maybe just one restart would do
+      
+    - name: ensure tomcat is running
+      service: name=tomcat state=started enabled=yes
+      
+    # DSpace build tools
+    - name: ensure dspace build tools are installed
+      yum: name={{ item }}
+      with_items:
+        - maven
+        - ant
+        - git
+        - wget
+
+    # Build DSpace
+    - name: load dspace package
+      become: false
+      get_url:
+        url: https://github.com/DSpace/DSpace/releases/download/dspace-5.6/dspace-5.6-src-release.tar.gz
+        checksum: sha256:92ade77f48b8c2a563b5667e080529e3de2eafa466ece726b71c5dd7250d48ae
+        dest: /home/vagrant/dspace-5.6-src-release.tar.gz
+
+    - name: extract package
+      become: false
+      command: tar zxf dspace-5.6-src-release.tar.gz
+      # stupid silly unarchive module does not work
+      
+    - name: copy build.properties
+      become: false
+      template: src=build.properties dest=dspace-5.6-src-release/build.properties
+
+    - name: create maven package
+      become: false
+      command: mvn package chdir=dspace-5.6-src-release
+
+    - name: create installation directory with correct user
+      file: path=/dspace state=directory owner=vagrant # TODO check the user
+        
+    - name: install dspace package
+      become: false
+      command: ant fresh_install chdir=dspace-5.6-src-release/dspace/target/dspace-installer
+
+      # copy DSpace webapps
+    - name: copy deployment descriptors
+      template: src={{item}} dest=/etc/tomcat/Catalina/localhost/{{item}}
+      with_items:
+        - ROOT.xml
+        - solr.xml
+        - oai.xml
+        - rest.xml
+      notify: restart tomcat
+        
+  handlers:
+    - name: restart postgresql
+      action: service name=postgresql state=restarted
+
+    - name: restart tomcat
+      action: service name=tomcat state=restarted

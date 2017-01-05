@@ -1,0 +1,4 @@
+<?xml version='1.0'?>
+<Context docBase="/dspace/webapps/rest" path="/rest"
+	 reloadable="true"
+	 cachingAllowed="false"/>
